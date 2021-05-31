@@ -259,9 +259,8 @@ func mkVM(t *testing.T, n int, d Distro, sshKey, hostURL, tdir string) func() {
 	if err != nil {
 		t.Fatalf("can't find cache dir: %v", err)
 	}
-	cdir = filepath.Join(cdir, "within", "mkvm")
+	cdir = filepath.Join(cdir, "tailscale", "vm-test")
 	os.MkdirAll(filepath.Join(cdir, "qcow2"), 0755)
-	os.MkdirAll(filepath.Join(cdir, "seed"), 0755)
 
 	port := 23100 + n
 
@@ -378,7 +377,7 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 
 	var (
 		ipMu  sync.Mutex
-		ipMap = []ipMapping{}
+		ipMap = map[string]ipMapping{}
 	)
 
 	mux := http.NewServeMux()
@@ -398,7 +397,8 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 		if err != nil {
 			log.Panicf("bad port: %v", port)
 		}
-		ipMap = append(ipMap, ipMapping{r.UserAgent(), port, host})
+		distro := r.UserAgent()
+		ipMap[distro] = ipMapping{distro, port, host}
 		t.Logf("%s: %v", name, host)
 	})
 
@@ -425,10 +425,10 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 	t.Logf("loginServer: %s", loginServer)
 
 	var numDistros = 0
+	tstest.FixLogs(t)
+	defer tstest.UnfixLogs(t)
 
-	cancels := make(chan func(), len(distros))
-
-	t.Run("mkvm", func(t *testing.T) {
+	t.Run("do", func(t *testing.T) {
 		for n, distro := range distros {
 			n, distro := n, distro
 			if rex.MatchString(distro.name) {
@@ -442,122 +442,99 @@ func TestVMIntegrationEndToEnd(t *testing.T) {
 				t.Parallel()
 
 				cancel := mkVM(t, n, distro, string(pubkey), loginServer, dir)
-				cancels <- cancel
-			})
-		}
-	})
+				defer cancel()
+				var ipm ipMapping
 
-	close(cancels)
-	for cancel := range cancels {
-		//lint:ignore SA9001 They do actually get ran
-		defer cancel()
-
-		if len(cancels) == 0 {
-			t.Log("all VMs started")
-			break
-		}
-	}
-
-	t.Run("wait-for-vms", func(t *testing.T) {
-		t.Log("waiting for VMs to register")
-		waiter := time.NewTicker(time.Second)
-		defer waiter.Stop()
-		n := 0
-		for {
-			<-waiter.C
-			ipMu.Lock()
-			if len(ipMap) == numDistros {
-				ipMu.Unlock()
-				break
-			} else {
-				if n%30 == 0 {
-					t.Logf("ipMap:   %d", len(ipMap))
-					t.Logf("distros: %d", numDistros)
-				}
-			}
-			n++
-			ipMu.Unlock()
-		}
-	})
-
-	ipMu.Lock()
-	defer ipMu.Unlock()
-	t.Run("join-net", func(t *testing.T) {
-		for _, ipm := range ipMap {
-			ipm := ipm
-			port := ipm.port
-			t.Run(ipm.name, func(t *testing.T) {
-				tstest.FixLogs(t)
-				t.Parallel()
-
-				hostport := fmt.Sprintf("127.0.0.1:%d", port)
-
-				// NOTE(Xe): This retry loop helps to make things a bit faster, centos sometimes is slow at starting its sshd. I don't know why they don't use socket activation.
-				const maxRetries = 5
-				var working bool
-				for i := 0; i < maxRetries; i++ {
-					conn, err := net.Dial("tcp", hostport)
-					if err == nil {
-						working = true
-						conn.Close()
-						break
+				t.Run("wait-for-start", func(t *testing.T) {
+					waiter := time.NewTicker(time.Second)
+					defer waiter.Stop()
+					var ok bool
+					for {
+						<-waiter.C
+						ipMu.Lock()
+						if ipm, ok = ipMap[distro.name]; ok {
+							ipMu.Unlock()
+							break
+						}
+						ipMu.Unlock()
 					}
-
-					time.Sleep(5 * time.Second)
-				}
-
-				if !working {
-					t.Fatalf("can't connect to %s, tried %d times", hostport, maxRetries)
-				}
-
-				t.Logf("about to ssh into 127.0.0.1:%d", port)
-				cli, err := ssh.Dial("tcp", hostport, &ssh.ClientConfig{
-					User:            "root",
-					Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer), ssh.Password(securePassword)},
-					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				copyBinaries(t, cli)
 
-				timeout := 5 * time.Minute
-
-				e, _, err := expect.SpawnSSH(cli, timeout, expect.Verbose(true), expect.VerboseWriter(log.Writer()))
-				if err != nil {
-					t.Fatalf("%d: can't register a shell session: %v", port, err)
-				}
-				defer e.Close()
-
-				t.Log("opened session")
-
-				_, _, err = e.Expect(regexp.MustCompile(`(\#)`), timeout)
-				if err != nil {
-					t.Fatalf("%d: can't get a shell: %v", port, err)
-				}
-				t.Logf("got shell for %d", port)
-				err = e.Send("systemctl start tailscaled.service\n")
-				if err != nil {
-					t.Fatalf("can't send command to start tailscaled: %v", err)
-				}
-				_, _, err = e.Expect(regexp.MustCompile(`(\#)`), timeout)
-				if err != nil {
-					t.Fatalf("%d: can't get a shell: %v", port, err)
-				}
-				err = e.Send(fmt.Sprintf("sudo tailscale up --login-server %s\n", loginServer))
-				if err != nil {
-					t.Fatalf("%d: can't send tailscale up command: %v", port, err)
-				}
-				_, _, err = e.Expect(regexp.MustCompile(`Success.`), timeout)
-				if err != nil {
-					t.Fatalf("not successful: %v", err)
-				}
+				testDistro(t, loginServer, signer, ipm)
 			})
 		}
 	})
 
 	if numNodes := cs.NumNodes(); numNodes != len(ipMap) {
 		t.Errorf("wanted %d nodes, got: %d", len(ipMap), numNodes)
+	}
+}
+
+func testDistro(t *testing.T, loginServer string, signer ssh.Signer, ipm ipMapping) {
+	t.Helper()
+	port := ipm.port
+	hostport := fmt.Sprintf("127.0.0.1:%d", port)
+	ccfg := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer), ssh.Password(securePassword)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	// NOTE(Xe): This retry loop helps to make things a bit faster, centos sometimes is slow at starting its sshd. I don't know why they don't use socket activation.
+	const maxRetries = 5
+	var working bool
+	for i := 0; i < maxRetries; i++ {
+		cli, err := ssh.Dial("tcp", hostport, ccfg)
+		if err == nil {
+			working = true
+			cli.Close()
+			break
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+
+	if !working {
+		t.Fatalf("can't connect to %s, tried %d times", hostport, maxRetries)
+	}
+
+	t.Logf("about to ssh into 127.0.0.1:%d", port)
+	cli, err := ssh.Dial("tcp", hostport, ccfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyBinaries(t, cli)
+
+	timeout := 5 * time.Minute
+
+	e, _, err := expect.SpawnSSH(cli, timeout, expect.Verbose(true), expect.VerboseWriter(log.Writer()))
+	if err != nil {
+		t.Fatalf("%d: can't register a shell session: %v", port, err)
+	}
+	defer e.Close()
+
+	t.Log("opened session")
+
+	_, _, err = e.Expect(regexp.MustCompile(`(\#)`), timeout)
+	if err != nil {
+		t.Fatalf("%d: can't get a shell: %v", port, err)
+	}
+	t.Logf("got shell for %d", port)
+	err = e.Send("systemctl start tailscaled.service\n")
+	if err != nil {
+		t.Fatalf("can't send command to start tailscaled: %v", err)
+	}
+	_, _, err = e.Expect(regexp.MustCompile(`(\#)`), timeout)
+	if err != nil {
+		t.Fatalf("%d: can't get a shell: %v", port, err)
+	}
+	err = e.Send(fmt.Sprintf("sudo tailscale up --login-server %s\n", loginServer))
+	if err != nil {
+		t.Fatalf("%d: can't send tailscale up command: %v", port, err)
+	}
+	_, _, err = e.Expect(regexp.MustCompile(`Success.`), timeout)
+	if err != nil {
+		t.Fatalf("not successful: %v", err)
 	}
 }
 
