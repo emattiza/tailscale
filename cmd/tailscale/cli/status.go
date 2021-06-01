@@ -5,7 +5,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/peterbourgon/ff/v2/ffcli"
 	"github.com/toqueteos/webbrowser"
 	"inet.af/netaddr"
@@ -127,43 +127,18 @@ func runStatus(ctx context.Context, args []string) error {
 		// Run below.
 	}
 
-	var buf bytes.Buffer
-	f := func(format string, a ...interface{}) { fmt.Fprintf(&buf, format, a...) }
+	t := table.NewWriter()
+	t.AppendHeader(table.Row{"IP", "Hostname", "OwnerLogin", "OS", "Peer Status"})
+	t.SetStyle(table.StyleLight)
 	printPS := func(ps *ipnstate.PeerStatus) {
-		active := peerActive(ps)
-		f("%-15s %-20s %-12s %-7s ",
-			firstIPString(ps.TailscaleIPs),
-			dnsOrQuoteHostname(st, ps),
-			ownerLogin(st, ps),
-			ps.OS,
-		)
-		relay := ps.Relay
-		anyTraffic := ps.TxBytes != 0 || ps.RxBytes != 0
-		if !active {
-			if ps.ExitNode {
-				f("idle; exit node")
-			} else if anyTraffic {
-				f("idle")
-			} else {
-				f("-")
-			}
-		} else {
-			f("active; ")
-			if ps.ExitNode {
-				f("exit node; ")
-			}
-			if relay != "" && ps.CurAddr == "" {
-				f("relay %q", relay)
-			} else if ps.CurAddr != "" {
-				f("direct %s", ps.CurAddr)
-			}
-		}
-		if anyTraffic {
-			f(", tx %d rx %d", ps.TxBytes, ps.RxBytes)
-		}
-		f("\n")
+		//f("%-15s %-20s %-12s %-7s ",
+		ip := firstIPString(ps.TailscaleIPs)
+		hostName := dnsOrQuoteHostname(st, ps)
+		owner := ownerLogin(st, ps)
+		OStext := ps.OS
+		peerStatus := peerStatus(ps)
+		t.AppendRow([]interface{}{ip, hostName, owner, OStext, peerStatus})
 	}
-
 	if statusArgs.self && st.Self != nil {
 		printPS(st.Self)
 	}
@@ -185,7 +160,8 @@ func runStatus(ctx context.Context, args []string) error {
 			printPS(ps)
 		}
 	}
-	os.Stdout.Write(buf.Bytes())
+	tableBytes := []byte(t.Render())
+	os.Stdout.Write(tableBytes)
 	return nil
 }
 
@@ -194,6 +170,37 @@ func runStatus(ctx context.Context, args []string) error {
 // TODO: have the server report this bool instead.
 func peerActive(ps *ipnstate.PeerStatus) bool {
 	return !ps.LastWrite.IsZero() && time.Since(ps.LastWrite) < 2*time.Minute
+}
+
+func peerStatus(ps *ipnstate.PeerStatus) string {
+	var statusBuilder strings.Builder
+	anyTraffic := ps.TxBytes != 0 || ps.RxBytes != 0
+	relay := ps.Relay
+	active := peerActive(ps)
+	f := func(format string, a ...interface{}) { fmt.Fprintf(&statusBuilder, format, a...) }
+	if !active {
+		if ps.ExitNode {
+				f("idle; exit node")
+			} else if anyTraffic {
+				f("idle")
+			} else {
+				f("-")
+			}
+		} else {
+			f("active; ")
+			if ps.ExitNode {
+				f("exit node; ")
+			}
+			if relay != "" && ps.CurAddr == "" {
+				f("relay %q", relay)
+			} else if ps.CurAddr != "" {
+				f("direct %s", ps.CurAddr)
+			}
+		}
+		if anyTraffic {
+			f(", tx %d rx %d", ps.TxBytes, ps.RxBytes)
+		}
+	return statusBuilder.String()
 }
 
 func dnsOrQuoteHostname(st *ipnstate.Status, ps *ipnstate.PeerStatus) string {

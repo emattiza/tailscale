@@ -7,7 +7,6 @@ require (
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/coreos/go-iptables v0.6.0
 	github.com/frankban/quicktest v1.13.0
-	github.com/tailscale/certstore v0.0.0-20210528134328-066c94b793d3
 	github.com/gliderlabs/ssh v0.3.2
 	github.com/go-multierror/multierror v1.0.2
 	github.com/go-ole/go-ole v1.2.5
@@ -15,6 +14,7 @@ require (
 	github.com/google/go-cmp v0.5.5
 	github.com/google/goexpect v0.0.0-20210430020637-ab937bf7fd6f
 	github.com/goreleaser/nfpm v1.10.3
+	github.com/jedib0t/go-pretty/v6 v6.2.2 // indirect
 	github.com/jsimonetti/rtnetlink v0.0.0-20210409061457-9561dc9288a7
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/klauspost/compress v1.12.2
@@ -25,6 +25,7 @@ require (
 	github.com/pborman/getopt v1.1.0
 	github.com/peterbourgon/ff/v2 v2.0.0
 	github.com/pkg/sftp v1.13.0 // indirect
+	github.com/tailscale/certstore v0.0.0-20210528134328-066c94b793d3
 	github.com/tailscale/depaware v0.0.0-20201214215404-77d1e9757027
 	github.com/tcnksm/go-httpstat v0.2.0
 	github.com/toqueteos/webbrowser v1.2.0
